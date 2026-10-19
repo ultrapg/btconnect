@@ -1,6 +1,5 @@
 package io.github.ultrapg.btconnect.ui
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -23,29 +22,25 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.BluetoothSearching
 import androidx.compose.material.icons.filled.AddLink
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BluetoothConnected
 import androidx.compose.material.icons.filled.BluetoothDisabled
-import androidx.compose.material.icons.filled.BluetoothSearching
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.LinkOff
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Mouse
-import androidx.compose.material.icons.filled. Radar
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Terminal
-import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Watch
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
-import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -54,7 +49,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -93,14 +87,14 @@ import io.github.ultrapg.btconnect.model.BypassStrategy
 import io.github.ultrapg.btconnect.model.DeviceCategory
 
 enum class DeviceFilter(val label: String) {
-    ALL("All Devices"),
-    SAVED_OR_CONNECTED("Saved & Active"),
-    MICE_KEYBOARDS("Mice & Keyboards"),
+    ALL("All"),
+    SAVED_OR_CONNECTED("Saved"),
+    MICE_KEYBOARDS("Mice & HID"),
     AUDIO("Audio"),
-    NAMED_ONLY("Named Only")
+    NAMED_ONLY("Named")
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
     controller: BluetoothBypassController,
@@ -120,8 +114,8 @@ fun MainScreen(
 
     var selectedFilter by rememberSaveable { mutableStateOf(DeviceFilter.ALL) }
     var selectedDeviceForSheet by remember { mutableStateOf<BtDeviceModel?>(null) }
+    var showPinSettingsSheet by rememberSaveable { mutableStateOf(false) }
     var showMacDialog by rememberSaveable { mutableStateOf(false) }
-    var showCustomPinDialog by rememberSaveable { mutableStateOf(false) }
     var showLogSheet by rememberSaveable { mutableStateOf(false) }
 
     val filteredDevices = remember(devices, selectedFilter) {
@@ -140,29 +134,40 @@ fun MainScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = if (isBluetoothEnabled) Icons.Default.BluetoothConnected else Icons.Default.BluetoothDisabled,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(26.dp)
+                    Column(
+                        modifier = Modifier.clickable { showLogSheet = true }
+                    ) {
+                        Text(
+                            text = "BTConnect",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold
                         )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column {
-                            Text(
-                                text = "BTConnect",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Direct Bluetooth Bypass • No Root",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                        Text(
+                            text = statusMessage,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 },
                 actions = {
+                    AssistChip(
+                        onClick = { showPinSettingsSheet = true },
+                        label = {
+                            Text(
+                                text = if (autoPairEnabled) "PIN $defaultPin" else "PIN Off",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Key,
+                                contentDescription = "Legacy PIN Settings",
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    )
                     IconButton(onClick = { showMacDialog = true }) {
                         Icon(
                             imageVector = Icons.Default.AddLink,
@@ -172,25 +177,18 @@ fun MainScreen(
                     IconButton(onClick = onLaunchCompanionAssociation) {
                         Icon(
                             imageVector = Icons.Default.Radar,
-                            contentDescription = "System Companion Device Association"
+                            contentDescription = "System Companion Association"
                         )
                     }
                     IconButton(onClick = { showLogSheet = true }) {
-                        Box {
-                            Icon(
-                                imageVector = Icons.Default.Terminal,
-                                contentDescription = "Bypass Activity Log"
-                            )
-                            if (logs.isNotEmpty()) {
-                                Badge(
-                                    modifier = Modifier.align(Alignment.TopEnd)
-                                )
-                            }
-                        }
+                        Icon(
+                            imageVector = Icons.Default.Terminal,
+                            contentDescription = "Diagnostics Log"
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
+                    containerColor = MaterialTheme.colorScheme.background
                 )
             )
         },
@@ -203,16 +201,16 @@ fun MainScreen(
                     icon = {
                         if (isScanning) {
                             CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.5.dp,
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer
                             )
                         } else {
-                            Icon(Icons.Default.BluetoothSearching, contentDescription = null)
+                            Icon(Icons.AutoMirrored.Filled.BluetoothSearching, contentDescription = null)
                         }
                     },
                     text = {
-                        Text(if (isScanning) "Stop Scan" else "Scan All Devices")
+                        Text(if (isScanning) "Stop" else "Scan")
                     }
                 )
             }
@@ -227,17 +225,34 @@ fun MainScreen(
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
 
+            // Minimal Single-Line Filter Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                DeviceFilter.entries.forEach { filter ->
+                    FilterChip(
+                        selected = selectedFilter == filter,
+                        onClick = { selectedFilter = filter },
+                        label = { Text(filter.label) }
+                    )
+                }
+            }
+
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
                     start = 16.dp,
                     end = 16.dp,
-                    top = 8.dp,
-                    bottom = 96.dp
+                    top = 4.dp,
+                    bottom = 92.dp
                 ),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // 1. Permission or Bluetooth Disabled Banner
                 if (!hasPermissions) {
                     item {
                         PermissionCard(onRequestPermissions = onRequestPermissions)
@@ -248,67 +263,6 @@ fun MainScreen(
                     }
                 }
 
-                // 2. Live Status & Legacy Auto-PIN Helper Card
-                item {
-                    LegacyBypassConfigCard(
-                        statusMessage = statusMessage,
-                        autoPairEnabled = autoPairEnabled,
-                        defaultPin = defaultPin,
-                        onToggleAutoPair = { controller.setAutoPairEnabled(it) },
-                        onSelectPin = { controller.setDefaultPin(it) },
-                        onOpenCustomPin = { showCustomPinDialog = true },
-                        onOpenLogs = { showLogSheet = true }
-                    )
-                }
-
-                // 3. Filter Chips Row
-                item {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        DeviceFilter.entries.forEach { filter ->
-                            FilterChip(
-                                selected = selectedFilter == filter,
-                                onClick = { selectedFilter = filter },
-                                label = { Text(filter.label) }
-                            )
-                        }
-                    }
-                }
-
-                // 4. Device Count & Quick Refresh Row
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "${filteredDevices.size} devices (${devices.count { it.isConnected }} connected, ${devices.count { it.isBonded }} saved)",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        TextButton(
-                            onClick = {
-                                controller.refreshBondedAndConnectedDevices()
-                                if (!isScanning) controller.startFullScan()
-                            }
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Refresh")
-                        }
-                    }
-                }
-
-                // 5. Empty State or Device List
                 if (filteredDevices.isEmpty()) {
                     item {
                         EmptyDevicesCard(
@@ -322,14 +276,14 @@ fun MainScreen(
                         items = filteredDevices,
                         key = { it.address }
                     ) { device ->
-                        DeviceItemCard(
+                        MinimalDeviceRow(
                             device = device,
                             isConnecting = connectingAddress == device.address,
                             onPrimaryAction = {
-                                if (device.isConnected) {
-                                    controller.disconnectDevice(device)
-                                } else {
-                                    controller.connectDevice(
+                                when {
+                                    connectingAddress == device.address -> controller.cancelCurrentConnection()
+                                    device.isConnected -> controller.disconnectDevice(device)
+                                    else -> controller.connectDevice(
                                         deviceModel = device,
                                         strategy = BypassStrategy.SMART_AUTO
                                     )
@@ -345,7 +299,7 @@ fun MainScreen(
         }
     }
 
-    // Device Bypass Strategy & Actions Bottom Sheet
+    // Device Options & Bypass Strategy Sheet
     selectedDeviceForSheet?.let { targetDevice ->
         val liveDevice = devices.find { it.address == targetDevice.address } ?: targetDevice
         DeviceBypassBottomSheet(
@@ -371,6 +325,17 @@ fun MainScreen(
         )
     }
 
+    // Legacy Auto-PIN Settings Sheet
+    if (showPinSettingsSheet) {
+        LegacyPinBottomSheet(
+            autoPairEnabled = autoPairEnabled,
+            defaultPin = defaultPin,
+            onToggleAutoPair = { controller.setAutoPairEnabled(it) },
+            onSelectPin = { controller.setDefaultPin(it) },
+            onDismiss = { showPinSettingsSheet = false }
+        )
+    }
+
     // Direct MAC Address Connect Dialog
     if (showMacDialog) {
         ConnectByMacDialog(
@@ -387,19 +352,7 @@ fun MainScreen(
         )
     }
 
-    // Custom PIN Dialog
-    if (showCustomPinDialog) {
-        CustomPinDialog(
-            currentPin = defaultPin,
-            onDismiss = { showCustomPinDialog = false },
-            onConfirm = { newPin ->
-                showCustomPinDialog = false
-                controller.setDefaultPin(newPin)
-            }
-        )
-    }
-
-    // Live Bypass Log Sheet
+    // Diagnostics Log Sheet
     if (showLogSheet) {
         BypassLogBottomSheet(
             logs = logs,
@@ -410,41 +363,164 @@ fun MainScreen(
 }
 
 @Composable
+private fun MinimalDeviceRow(
+    device: BtDeviceModel,
+    isConnecting: Boolean,
+    onPrimaryAction: () -> Unit,
+    onOpenOptions: () -> Unit
+) {
+    val containerColor = when {
+        device.isConnected -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+        device.isBonded -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+        else -> MaterialTheme.colorScheme.surface
+    }
+
+    Card(
+        onClick = onOpenOptions,
+        colors = CardDefaults.cardColors(containerColor = containerColor),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = if (device.isConnected) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant
+                },
+                modifier = Modifier.size(42.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = categoryIcon(device.category),
+                        contentDescription = null,
+                        tint = if (device.isConnected) {
+                            MaterialTheme.colorScheme.onPrimary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = device.displayName,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = device.conciseSubtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (device.isConnected) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            when {
+                isConnecting -> {
+                    FilledTonalButton(
+                        onClick = onPrimaryAction,
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Cancel", style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+
+                device.isConnected -> {
+                    FilledTonalButton(
+                        onClick = onPrimaryAction,
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                    ) {
+                        Text("Disconnect", style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+
+                else -> {
+                    Button(
+                        onClick = onPrimaryAction,
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        Text("Connect", style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+            }
+
+            IconButton(
+                onClick = onOpenOptions,
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.MoreVert,
+                    contentDescription = "More Options",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun PermissionCard(onRequestPermissions: () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.primaryContainer
         ),
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(16.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(18.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = Icons.Default.Security,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer
-                )
-                Spacer(modifier = Modifier.width(10.dp))
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.Security,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Bluetooth & Discovery Permissions Needed",
-                    style = MaterialTheme.typography.titleMedium,
+                    text = "Bluetooth Permission Needed",
+                    style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onPrimaryContainer
                 )
+                Text(
+                    text = "Required for unfiltered Classic & BLE discovery",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
             }
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = "To discover legacy Classic BR/EDR devices (like older Apple Magic Mice and keyboards) and connect directly without Android Settings, grant Bluetooth & nearby scan permissions.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onPrimaryContainer
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Button(
-                onClick = onRequestPermissions,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Grant Permissions")
+            Spacer(modifier = Modifier.width(8.dp))
+            Button(onClick = onRequestPermissions) {
+                Text("Grant")
             }
         }
     }
@@ -456,337 +532,30 @@ private fun BluetoothDisabledCard(onEnableBluetooth: () -> Unit) {
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.errorContainer
         ),
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(16.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(18.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = Icons.Default.BluetoothDisabled,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onErrorContainer
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = "Bluetooth is Turned Off",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onErrorContainer
-                )
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-            Button(
-                onClick = onEnableBluetooth,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Turn On Bluetooth")
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.BluetoothDisabled,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onErrorContainer
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                text = "Bluetooth is turned off",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.weight(1f)
+            )
+            Button(onClick = onEnableBluetooth) {
+                Text("Turn On")
             }
         }
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun LegacyBypassConfigCard(
-    statusMessage: String,
-    autoPairEnabled: Boolean,
-    defaultPin: String,
-    onToggleAutoPair: (Boolean) -> Unit,
-    onSelectPin: (String) -> Unit,
-    onOpenCustomPin: () -> Unit,
-    onOpenLogs: () -> Unit
-) {
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
-        ),
-        shape = RoundedCornerShape(20.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onOpenLogs() },
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "BYPASS ENGINE STATUS",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = statusMessage,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-                Icon(
-                    imageVector = Icons.Default.Terminal,
-                    contentDescription = "View Logs",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Auto-Pair Legacy Devices (Magic Mouse / HID)",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = "Automatically injects PIN & confirms pairing before Android Settings fails",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                Switch(
-                    checked = autoPairEnabled,
-                    onCheckedChange = onToggleAutoPair
-                )
-            }
-
-            AnimatedVisibility(visible = autoPairEnabled) {
-                Column {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        val presetPins = listOf("0000", "1234", "1111")
-                        presetPins.forEach { pin ->
-                            FilterChip(
-                                selected = defaultPin == pin,
-                                onClick = { onSelectPin(pin) },
-                                label = {
-                                    Text(if (pin == "0000") "PIN: 0000 (Magic Mouse)" else "PIN: $pin")
-                                },
-                                leadingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Default.Key,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                            )
-                        }
-                        AssistChip(
-                            onClick = onOpenCustomPin,
-                            label = {
-                                val isCustom = defaultPin !in presetPins
-                                Text(if (isCustom) "Custom: $defaultPin" else "Custom PIN...")
-                            }
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun DeviceItemCard(
-    device: BtDeviceModel,
-    isConnecting: Boolean,
-    onPrimaryAction: () -> Unit,
-    onOpenOptions: () -> Unit
-) {
-    val containerColor = when {
-        device.isConnected -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
-        device.isBonded -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-        else -> MaterialTheme.colorScheme.surface
-    }
-
-    Card(
-        onClick = onOpenOptions,
-        colors = CardDefaults.cardColors(containerColor = containerColor),
-        elevation = CardDefaults.cardElevation(defaultElevation = if (device.isConnected) 2.dp else 1.dp),
-        shape = RoundedCornerShape(18.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Surface(
-                    shape = CircleShape,
-                    color = if (device.isConnected) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.secondaryContainer
-                    },
-                    modifier = Modifier.size(46.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = categoryIcon(device.category),
-                            contentDescription = null,
-                            tint = if (device.isConnected) {
-                                MaterialTheme.colorScheme.onPrimary
-                            } else {
-                                MaterialTheme.colorScheme.onSecondaryContainer
-                            }
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.width(14.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = device.displayName,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(2.dp))
-
-                    Text(
-                        text = buildString {
-                            append(device.address)
-                            append(" • ")
-                            append(device.transportLabel)
-                            device.rssi?.let { append(" • $it dBm") }
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                FilledTonalIconButton(onClick = onOpenOptions) {
-                    Icon(
-                        imageVector = Icons.Default.Tune,
-                        contentDescription = "Connection Mode & Options",
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Status Badges + One-Tap Connect Button Row
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    if (device.isConnected) {
-                        StatusPill(
-                            text = if (device.connectedProfiles.isNotEmpty()) {
-                                "Connected (${device.connectedProfiles.joinToString(", ")})"
-                            } else {
-                                "Connected"
-                            },
-                            isHighlighted = true
-                        )
-                    } else if (device.isBonding) {
-                        StatusPill(text = "Pairing...", isHighlighted = true)
-                    } else if (device.isBonded) {
-                        StatusPill(text = "Saved / Paired", isHighlighted = false)
-                    }
-
-                    StatusPill(
-                        text = if (device.isLikelyLegacyHidOrMagicMouse) {
-                            "HID / Mouse Bypass"
-                        } else {
-                            device.recommendedStrategy.badge
-                        },
-                        isHighlighted = false
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                if (device.isConnected) {
-                    FilledTonalButton(
-                        onClick = onPrimaryAction,
-                        enabled = !isConnecting
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.LinkOff,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Disconnect")
-                    }
-                } else {
-                    Button(
-                        onClick = onPrimaryAction,
-                        enabled = !isConnecting
-                    ) {
-                        if (isConnecting) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.onPrimary
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Connecting...")
-                        } else {
-                            Icon(
-                                imageVector = Icons.Default.BluetoothConnected,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Connect")
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun StatusPill(text: String, isHighlighted: Boolean) {
-    Surface(
-        shape = RoundedCornerShape(50),
-        color = if (isHighlighted) {
-            MaterialTheme.colorScheme.tertiaryContainer
-        } else {
-            MaterialTheme.colorScheme.surfaceVariant
-        }
-    ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelSmall,
-            color = if (isHighlighted) {
-                MaterialTheme.colorScheme.onTertiaryContainer
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            },
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-        )
     }
 }
 
@@ -796,48 +565,131 @@ private fun EmptyDevicesCard(
     onStartScan: () -> Unit,
     onConnectByMac: () -> Unit
 ) {
-    Card(
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-        ),
-        modifier = Modifier.fillMaxWidth()
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 48.dp, horizontal = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.BluetoothSearching,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(42.dp)
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        Text(
+            text = if (isScanning) "Scanning nearby devices..." else "No devices in this view",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "Put your mouse, keyboard, or audio device in pairing mode.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (!isScanning) {
+                Button(onClick = onStartScan) {
+                    Text("Scan Now")
+                }
+            }
+            OutlinedButton(onClick = onConnectByMac) {
+                Text("Connect by MAC")
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+private fun LegacyPinBottomSheet(
+    autoPairEnabled: Boolean,
+    defaultPin: String,
+    onToggleAutoPair: (Boolean) -> Unit,
+    onSelectPin: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var customPinText by rememberSaveable(defaultPin) { mutableStateOf(defaultPin) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp)
         ) {
-            Icon(
-                imageVector = Icons.Default.BluetoothSearching,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(48.dp)
-            )
-            Spacer(modifier = Modifier.height(12.dp))
             Text(
-                text = if (isScanning) "Scanning for nearby Bluetooth devices..." else "No devices matching filter",
-                style = MaterialTheme.typography.titleMedium,
+                text = "Legacy Auto-PIN Bypass",
+                style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold
             )
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "Turn on your Bluetooth mouse, keyboard, or audio device and put it into pairing mode. For Apple Magic Mouse, turn the switch off and back on while holding the button.",
+                text = "Automatically answers legacy PIN requests (such as Apple Magic Mouse 1st Gen '0000' or older keyboards) before Android Settings times out.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+
             Spacer(modifier = Modifier.height(16.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (!isScanning) {
-                    Button(onClick = onStartScan) {
-                        Text("Start Unfiltered Scan")
-                    }
-                }
-                OutlinedButton(onClick = onConnectByMac) {
-                    Text("Connect by MAC")
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "Auto-Inject Pairing PIN",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium
+                )
+                Switch(
+                    checked = autoPairEnabled,
+                    onCheckedChange = onToggleAutoPair
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(
+                    "0000" to "0000 (Magic Mouse / Default)",
+                    "1234" to "1234",
+                    "1111" to "1111",
+                    "8888" to "8888"
+                ).forEach { (pin, label) ->
+                    FilterChip(
+                        selected = defaultPin == pin,
+                        onClick = {
+                            customPinText = pin
+                            onSelectPin(pin)
+                        },
+                        label = { Text(label) }
+                    )
                 }
             }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            OutlinedTextField(
+                value = customPinText,
+                onValueChange = {
+                    customPinText = it
+                    if (it.isNotBlank()) onSelectPin(it)
+                },
+                label = { Text("Custom PIN Code") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
     }
 }
@@ -881,37 +733,29 @@ private fun DeviceBypassBottomSheet(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            Text(
-                text = "Select Bypass Connection Method",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-
             BypassStrategy.entries.forEach { strategy ->
                 val isSelected = chosenStrategy == strategy
                 Surface(
                     onClick = { chosenStrategy = strategy },
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RoundedCornerShape(12.dp),
                     color = if (isSelected) {
-                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
                     } else {
-                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
                     },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 4.dp)
+                        .padding(vertical = 3.dp)
                 ) {
                     Row(
-                        modifier = Modifier.padding(12.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         RadioButton(
                             selected = isSelected,
                             onClick = { chosenStrategy = strategy }
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = strategy.title,
@@ -929,23 +773,22 @@ private fun DeviceBypassBottomSheet(
             }
 
             if (device.isBonded) {
-                Spacer(modifier = Modifier.height(8.dp))
+                HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { forceFreshRebond = !forceFreshRebond }
-                        .padding(vertical = 4.dp),
+                        .clickable { forceFreshRebond = !forceFreshRebond },
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Force Fresh Re-Pair (Clear Stale Bond First)",
+                            text = "Force Fresh Re-Pair",
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Medium
                         )
                         Text(
-                            text = "Use when a saved device refuses to reconnect after battery swap",
+                            text = "Clears stale pairing state before connecting",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -963,38 +806,39 @@ private fun DeviceBypassBottomSheet(
                 onClick = { onConnectWithStrategy(chosenStrategy, forceFreshRebond) },
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Icon(Icons.Default.BluetoothConnected, contentDescription = null)
+                Icon(Icons.Default.BluetoothConnected, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Force Connect Now (PIN: $defaultPin)")
+                Text("Connect (PIN $defaultPin)")
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                if (device.isConnected) {
-                    FilledTonalButton(
-                        onClick = onDisconnect,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(Icons.Default.LinkOff, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Disconnect")
+            if (device.isConnected || device.isBonded) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (device.isConnected) {
+                        FilledTonalButton(
+                            onClick = onDisconnect,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.LinkOff, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Disconnect")
+                        }
                     }
-                }
-                if (device.isBonded) {
-                    OutlinedButton(
-                        onClick = onUnpair,
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = MaterialTheme.colorScheme.error
-                        ),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(Icons.Default.DeleteOutline, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Forget / Unpair")
+                    if (device.isBonded) {
+                        OutlinedButton(
+                            onClick = onUnpair,
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            ),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.DeleteOutline, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Forget")
+                        }
                     }
                 }
             }
@@ -1011,28 +855,24 @@ private fun ConnectByMacDialog(
     var macInput by rememberSaveable { mutableStateOf("") }
     var pinInput by rememberSaveable { mutableStateOf(defaultPin) }
     var strategy by remember { mutableStateOf(BypassStrategy.LEGACY_HID_MAGIC_MOUSE) }
+    val isValidMac = BtDeviceModel.normalizeMacAddress(macInput) != null
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Direct Connect by MAC Address") },
+        title = { Text("Connect by MAC") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    text = "Connect directly to an older or hidden Bluetooth device even if Android discovery cannot see it.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
                 OutlinedTextField(
                     value = macInput,
                     onValueChange = { macInput = it },
-                    label = { Text("Bluetooth MAC (e.g. 00:1A:7D:DA:71:13)") },
+                    label = { Text("MAC Address (XX:XX:XX:XX:XX:XX)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
                 OutlinedTextField(
                     value = pinInput,
                     onValueChange = { pinInput = it },
-                    label = { Text("Legacy Pairing PIN (0000 or 1234)") },
+                    label = { Text("Pairing PIN") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -1053,52 +893,9 @@ private fun ConnectByMacDialog(
         confirmButton = {
             Button(
                 onClick = { onConnect(macInput, strategy, pinInput) },
-                enabled = macInput.trim().length >= 11
+                enabled = isValidMac
             ) {
-                Text("Force Connect")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
-        }
-    )
-}
-
-@Composable
-private fun CustomPinDialog(
-    currentPin: String,
-    onDismiss: () -> Unit,
-    onConfirm: (String) -> Unit
-) {
-    var pinText by rememberSaveable { mutableStateOf(currentPin) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Set Legacy Pairing PIN") },
-        text = {
-            Column {
-                Text(
-                    text = "Apple Magic Mouse (1st Gen) and most older mice/keyboards use '0000' or '1234'.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(10.dp))
-                OutlinedTextField(
-                    value = pinText,
-                    onValueChange = { pinText = it },
-                    label = { Text("PIN Code") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = { onConfirm(pinText.ifBlank { "0000" }) }
-            ) {
-                Text("Save PIN")
+                Text("Connect")
             }
         },
         dismissButton = {
@@ -1133,7 +930,7 @@ private fun BypassLogBottomSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Bypass Engine Diagnostics",
+                    text = "Bypass Activity Log",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -1149,15 +946,15 @@ private fun BypassLogBottomSheet(
             Spacer(modifier = Modifier.height(8.dp))
             Surface(
                 shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(320.dp)
+                    .height(300.dp)
             ) {
                 if (logs.isEmpty()) {
                     Box(contentAlignment = Alignment.Center) {
                         Text(
-                            text = "No bypass events logged yet.",
+                            text = "No events logged yet.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

@@ -20,38 +20,44 @@ import android.os.Build
 import android.os.ParcelUuid
 import io.github.ultrapg.btconnect.model.BtDeviceModel
 import io.github.ultrapg.btconnect.model.BypassStrategy
-import io.github.ultrapg.btconnect.model.DeviceCategory
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.lang.reflect.Method
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.coroutineContext
 
 @SuppressLint("MissingPermission")
 class BluetoothBypassController(private val context: Context) {
 
     companion object {
-        // Standard & Hidden Android BluetoothProfile IDs
         const val PROFILE_HEADSET = BluetoothProfile.HEADSET // 1
         const val PROFILE_A2DP = BluetoothProfile.A2DP       // 2
         const val PROFILE_HID_HOST = 4                       // BluetoothHidHost / BluetoothInputDevice
         const val PROFILE_PAN = 5                            // BluetoothPan
 
-        // Transport constants for createBond(int transport)
         const val TRANSPORT_AUTO = 0
         const val TRANSPORT_BREDR = 1
         const val TRANSPORT_LE = 2
+
+        private const val SOCKET_CONNECT_TIMEOUT_MS = 3_200L
 
         val UUID_SPP: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
         val UUID_HID_CLASSIC: UUID = UUID.fromString("00001124-0000-1000-8000-00805F9B34FB")
@@ -71,6 +77,9 @@ class BluetoothBypassController(private val context: Context) {
     private val activeGatts = ConcurrentHashMap<String, BluetoothGatt>()
     private val profileProxies = ConcurrentHashMap<Int, BluetoothProfile>()
 
+    @Volatile
+    private var pendingSocket: BluetoothSocket? = null
+
     private val _devices = MutableStateFlow<List<BtDeviceModel>>(emptyList())
     val devices: StateFlow<List<BtDeviceModel>> = _devices.asStateFlow()
 
@@ -83,7 +92,7 @@ class BluetoothBypassController(private val context: Context) {
     private val _connectingAddress = MutableStateFlow<String?>(null)
     val connectingAddress: StateFlow<String?> = _connectingAddress.asStateFlow()
 
-    private val _statusMessage = MutableStateFlow("Ready — Tap any device to force-connect")
+    private val _statusMessage = MutableStateFlow("Ready")
     val statusMessage: StateFlow<String> = _statusMessage.asStateFlow()
 
     private val _logs = MutableStateFlow<List<String>>(emptyList())
@@ -96,14 +105,16 @@ class BluetoothBypassController(private val context: Context) {
     val defaultPin: StateFlow<String> = _defaultPin.asStateFlow()
 
     private var scanJob: Job? = null
+    private var connectJob: Job? = null
+
+    @Volatile
     private var isLeScanning = false
     private var receiverRegistered = false
 
     private val profileListener = object : BluetoothProfile.ServiceListener {
         override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
             profileProxies[profile] = proxy
-            val name = profileName(profile)
-            appendLog("Bound system profile proxy: $name (id=$profile)")
+            appendLog("Bound system profile proxy: ${profileName(profile)}")
             refreshBondedAndConnectedDevices()
         }
 
@@ -132,7 +143,8 @@ class BluetoothBypassController(private val context: Context) {
         }
 
         override fun onScanFailed(errorCode: Int) {
-            appendLog("BLE scan warning (code=$errorCode) — Classic BR/EDR discovery continues")
+            isLeScanning = false
+            appendLog("BLE scan note (code=$errorCode) — Classic inquiry active")
         }
     }
 
@@ -141,10 +153,13 @@ class BluetoothBypassController(private val context: Context) {
             when (intent.action) {
                 BluetoothAdapter.ACTION_STATE_CHANGED -> {
                     val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
-                    _isBluetoothEnabled.value = (state == BluetoothAdapter.STATE_ON)
-                    if (state == BluetoothAdapter.STATE_ON) {
+                    val enabled = (state == BluetoothAdapter.STATE_ON)
+                    _isBluetoothEnabled.value = enabled
+                    if (enabled) {
                         bindSystemProfileProxies()
                         refreshBondedAndConnectedDevices()
+                    } else if (state == BluetoothAdapter.STATE_OFF || state == BluetoothAdapter.STATE_TURNING_OFF) {
+                        cleanupOnBluetoothOff()
                     }
                 }
 
@@ -178,9 +193,9 @@ class BluetoothBypassController(private val context: Context) {
                     val device = extractDevice(intent) ?: return
                     val bondState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)
                     val stateLabel = when (bondState) {
-                        BluetoothDevice.BOND_BONDED -> "BONDED (Paired)"
-                        BluetoothDevice.BOND_BONDING -> "BONDING (Pairing...)"
-                        else -> "UNBONDED"
+                        BluetoothDevice.BOND_BONDED -> "Paired"
+                        BluetoothDevice.BOND_BONDING -> "Pairing..."
+                        else -> "Unpaired"
                     }
                     appendLog("Bond state for ${device.address}: $stateLabel")
                     upsertFromBluetoothDevice(device)
@@ -196,6 +211,7 @@ class BluetoothBypassController(private val context: Context) {
                 BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
                     val device = extractDevice(intent) ?: return
                     appendLog("ACL baseband link DISCONNECTED: ${device.address}")
+                    activeSockets.remove(device.address)?.let { runCatching { it.close() } }
                     upsertFromBluetoothDevice(device, forceConnected = false)
                 }
 
@@ -206,7 +222,10 @@ class BluetoothBypassController(private val context: Context) {
                     appendLog("Intercepted PAIRING_REQUEST from ${device.address} (variant=$variant, key=$passkey)")
 
                     if (_autoPairEnabled.value) {
-                        handlePairingBypass(device, variant)
+                        val handled = handlePairingBypass(device, variant)
+                        if (handled && variant == BluetoothDevice.PAIRING_VARIANT_PIN) {
+                            runCatching { abortBroadcast() }
+                        }
                     }
                 }
 
@@ -215,7 +234,7 @@ class BluetoothBypassController(private val context: Context) {
                 }
 
                 BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
-                    if (!isLeScanning) {
+                    if (!isLeScanning && scanJob?.isActive != true) {
                         _isScanning.value = false
                     }
                 }
@@ -232,12 +251,13 @@ class BluetoothBypassController(private val context: Context) {
 
     fun setAutoPairEnabled(enabled: Boolean) {
         _autoPairEnabled.value = enabled
-        appendLog("Auto-PIN legacy pairing bypass ${if (enabled) "ENABLED (PIN=${_defaultPin.value})" else "DISABLED"}")
+        appendLog("Auto-PIN legacy pairing ${if (enabled) "enabled (PIN=${_defaultPin.value})" else "disabled"}")
     }
 
     fun setDefaultPin(pin: String) {
-        _defaultPin.value = pin
-        appendLog("Default legacy PIN set to '$pin'")
+        val sanitized = pin.trim().ifBlank { "0000" }
+        _defaultPin.value = sanitized
+        appendLog("Default legacy PIN set to '$sanitized'")
     }
 
     private fun registerReceiversIfNeeded() {
@@ -275,6 +295,25 @@ class BluetoothBypassController(private val context: Context) {
         }
     }
 
+    private fun cleanupOnBluetoothOff() {
+        scanJob?.cancel()
+        connectJob?.cancel()
+        isLeScanning = false
+        _isScanning.value = false
+        _connectingAddress.value = null
+        activeSockets.values.forEach { runCatching { it.close() } }
+        activeSockets.clear()
+        activeGatts.values.forEach {
+            runCatching {
+                it.disconnect()
+                it.close()
+            }
+        }
+        activeGatts.clear()
+        _statusMessage.value = "Bluetooth is turned off"
+        publishDeviceList()
+    }
+
     fun refreshBondedAndConnectedDevices() {
         val btAdapter = adapter ?: return
         _isBluetoothEnabled.value = btAdapter.isEnabled
@@ -286,8 +325,7 @@ class BluetoothBypassController(private val context: Context) {
             }
         }
 
-        // Also inspect connected devices from bound system profile proxies
-        profileProxies.forEach { (profileId, proxy) ->
+        profileProxies.forEach { (_, proxy) ->
             runCatching {
                 proxy.connectedDevices?.forEach { device ->
                     upsertFromBluetoothDevice(device, forceConnected = true)
@@ -295,7 +333,6 @@ class BluetoothBypassController(private val context: Context) {
             }
         }
 
-        // Also check BLE GATT connected devices
         runCatching {
             bluetoothManager?.getConnectedDevices(BluetoothProfile.GATT)?.forEach { device ->
                 upsertFromBluetoothDevice(device, forceConnected = true)
@@ -308,91 +345,108 @@ class BluetoothBypassController(private val context: Context) {
     fun startFullScan() {
         val btAdapter = adapter
         if (btAdapter == null || !btAdapter.isEnabled) {
-            _statusMessage.value = "Bluetooth is turned off. Please enable Bluetooth."
+            _statusMessage.value = "Turn on Bluetooth to scan"
             return
         }
 
         refreshBondedAndConnectedDevices()
         scanJob?.cancel()
         scanJob = scope.launch {
-            _isScanning.value = true
-            _statusMessage.value = "Scanning Classic BR/EDR + BLE (unfiltered)..."
-            appendLog("Starting unfiltered dual-stack scan (Classic BR/EDR + Low-Latency BLE)")
+            try {
+                _isScanning.value = true
+                _statusMessage.value = "Scanning nearby devices..."
+                appendLog("Starting dual-stack scan (Classic BR/EDR + Low-Latency BLE)")
 
-            // 1. Classic Bluetooth Discovery (finds Apple Magic Mouse 1, legacy keyboards, audio, SPP)
-            runCatching {
-                if (btAdapter.isDiscovering) {
-                    btAdapter.cancelDiscovery()
+                runCatching {
+                    if (btAdapter.isDiscovering) {
+                        btAdapter.cancelDiscovery()
+                    }
+                    val started = btAdapter.startDiscovery()
+                    appendLog("Classic BR/EDR startDiscovery() -> $started")
                 }
-                val started = btAdapter.startDiscovery()
-                appendLog("Classic BR/EDR startDiscovery() -> $started")
-            }.onFailure {
-                appendLog("Classic discovery error: ${it.message}")
-            }
 
-            // 2. Unfiltered BLE Scanner (finds BLE mice, keyboards, Dual-mode devices, HOGP)
-            runCatching {
-                val scanner = btAdapter.bluetoothLeScanner
-                if (scanner != null && !isLeScanning) {
-                    val settings = ScanSettings.Builder()
-                        .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                        .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
-                        .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
-                        .build()
-                    scanner.startScan(null, settings, leScanCallback)
-                    isLeScanning = true
-                    appendLog("Unfiltered BLE scan started (SCAN_MODE_LOW_LATENCY)")
+                runCatching {
+                    val scanner = btAdapter.bluetoothLeScanner
+                    if (scanner != null) {
+                        if (isLeScanning) {
+                            runCatching { scanner.stopScan(leScanCallback) }
+                            isLeScanning = false
+                        }
+                        val settings = ScanSettings.Builder()
+                            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                            .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+                            .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+                            .build()
+                        scanner.startScan(null, settings, leScanCallback)
+                        isLeScanning = true
+                    }
                 }
-            }.onFailure {
-                appendLog("BLE scan error: ${it.message}")
-            }
 
-            // Keep scanning for 18 seconds and re-trigger classic discovery if needed
-            delay(18_000)
-            stopScan()
+                delay(15_000)
+            } finally {
+                stopScanRadioInternal()
+                if (_connectingAddress.value == null) {
+                    _statusMessage.value = "Ready • ${deviceCache.size} devices"
+                }
+            }
         }
     }
 
     fun stopScan() {
         scanJob?.cancel()
+        stopScanRadioInternal()
+        if (_connectingAddress.value == null) {
+            _statusMessage.value = "Ready • ${deviceCache.size} devices"
+        }
+    }
+
+    private fun stopScanRadioInternal() {
         val btAdapter = adapter
         runCatching {
             if (btAdapter?.isDiscovering == true) {
                 btAdapter.cancelDiscovery()
             }
         }
-        runCatching {
+        try {
             if (isLeScanning) {
                 btAdapter?.bluetoothLeScanner?.stopScan(leScanCallback)
-                isLeScanning = false
             }
-        }
-        _isScanning.value = false
-        if (_connectingAddress.value == null) {
-            _statusMessage.value = "Scan complete (${deviceCache.size} devices found)"
+        } catch (_: Exception) {
+        } finally {
+            isLeScanning = false
+            _isScanning.value = false
         }
     }
 
-    /**
-     * Connects to a device by MAC address using the selected [BypassStrategy].
-     * Works even for hidden/undiscovered devices if the user enters their MAC address directly.
-     */
+    fun cancelCurrentConnection() {
+        val addr = _connectingAddress.value
+        runCatching { pendingSocket?.close() }
+        pendingSocket = null
+        connectJob?.cancel()
+        connectJob = null
+        _connectingAddress.value = null
+        if (addr != null) {
+            appendLog("Cancelled connection attempt to $addr")
+            _statusMessage.value = "Connection cancelled"
+        }
+    }
+
     fun connectByMac(
         rawAddress: String,
         strategy: BypassStrategy = BypassStrategy.SMART_AUTO,
         forceRebond: Boolean = false,
         customPin: String? = null
     ) {
-        val normalized = rawAddress.trim().uppercase(Locale.US).replace("-", ":")
-        if (!BluetoothAdapter.checkBluetoothAddress(normalized)) {
-            _statusMessage.value = "Invalid MAC address: $rawAddress (expected XX:XX:XX:XX:XX:XX)"
+        val normalized = BtDeviceModel.normalizeMacAddress(rawAddress)
+        if (normalized == null) {
+            _statusMessage.value = "Invalid MAC address: $rawAddress"
             appendLog("Rejected invalid MAC address: $rawAddress")
             return
         }
         val btAdapter = adapter ?: return
         val remoteDevice = runCatching { btAdapter.getRemoteDevice(normalized) }.getOrNull()
         if (remoteDevice == null) {
-            _statusMessage.value = "Could not resolve remote device $normalized"
+            _statusMessage.value = "Could not resolve $normalized"
             return
         }
         val model = upsertFromBluetoothDevice(remoteDevice)
@@ -407,7 +461,7 @@ class BluetoothBypassController(private val context: Context) {
     ) {
         val btAdapter = adapter
         if (btAdapter == null || !btAdapter.isEnabled) {
-            _statusMessage.value = "Please turn on Bluetooth first"
+            _statusMessage.value = "Turn on Bluetooth first"
             return
         }
 
@@ -415,7 +469,12 @@ class BluetoothBypassController(private val context: Context) {
             _defaultPin.value = customPin.trim()
         }
 
-        scope.launch {
+        // Cancel any previous connection attempt cleanly
+        runCatching { pendingSocket?.close() }
+        val previousJob = connectJob
+
+        connectJob = scope.launch {
+            previousJob?.cancelAndJoin()
             val address = deviceModel.address
             _connectingAddress.value = address
 
@@ -426,29 +485,23 @@ class BluetoothBypassController(private val context: Context) {
             }
 
             try {
-                // Step 1: Stop discovery so radio paging has full bandwidth
-                stopScan()
+                stopScanRadioInternal()
+                scanJob?.cancel()
+
                 val device = btAdapter.getRemoteDevice(address)
                 val name = safeDeviceName(device)
-                appendLog("=== Starting Bypass Connect for $name [$address] ===")
-                appendLog("Selected mode: ${effectiveStrategy.title}")
+                appendLog("=== Bypass Connect: $name [$address] (${effectiveStrategy.badge}) ===")
 
-                // Step 2: Optional clean unpair if stuck in corrupted bond state
                 if (forceRebond && device.bondState == BluetoothDevice.BOND_BONDED) {
-                    _statusMessage.value = "Clearing corrupted bond for $name..."
-                    appendLog("Invoking removeBond() reflection to clear stale pairing state")
+                    _statusMessage.value = "Resetting pairing for $name..."
                     invokeRemoveBond(device)
-                    delay(1200)
+                    delay(1_000)
                 }
 
-                // Step 3: Trigger SDP UUID fetch to wake up remote stack
-                _statusMessage.value = "Waking up $name (SDP & Baseband)..."
-                runCatching {
-                    device.fetchUuidsWithSdp()
-                    appendLog("Triggered fetchUuidsWithSdp() on $address")
-                }
+                _statusMessage.value = "Waking up $name..."
+                runCatching { device.fetchUuidsWithSdp() }
 
-                // Step 4: Pair / Bond with explicit transport bypass if not yet bonded
+                // Pair / Bond with explicit transport if not bonded
                 if (device.bondState != BluetoothDevice.BOND_BONDED) {
                     val preferredTransport = when (effectiveStrategy) {
                         BypassStrategy.LEGACY_HID_MAGIC_MOUSE,
@@ -462,94 +515,135 @@ class BluetoothBypassController(private val context: Context) {
                         }
                     }
 
-                    _statusMessage.value = "Pairing $name (Transport=${transportName(preferredTransport)}, PIN=${_defaultPin.value})..."
+                    _statusMessage.value = "Pairing $name (PIN ${_defaultPin.value})..."
                     val bondInitiated = invokeCreateBondWithTransport(device, preferredTransport)
-                    appendLog("createBond(transport=$preferredTransport) initiated -> $bondInitiated")
+                    appendLog("createBond(transport=${transportName(preferredTransport)}) -> $bondInitiated")
 
-                    // Wait up to 10 seconds for bonding or ACL connection
-                    var waitedMs = 0L
-                    while (waitedMs < 10_000L &&
-                        device.bondState == BluetoothDevice.BOND_BONDING &&
-                        !isDeviceAclConnected(device)
-                    ) {
-                        delay(400)
-                        waitedMs += 400
+                    if (bondInitiated) {
+                        // Wait up to 2.0s for bondState to leave BOND_NONE
+                        var startWaitMs = 0L
+                        while (coroutineContext.isActive &&
+                            startWaitMs < 2_000L &&
+                            device.bondState == BluetoothDevice.BOND_NONE &&
+                            !isDeviceAclConnected(device)
+                        ) {
+                            delay(200)
+                            startWaitMs += 200
+                        }
+
+                        // Wait up to 12.0s while BOND_BONDING is in progress
+                        var bondingWaitMs = 0L
+                        while (coroutineContext.isActive &&
+                            bondingWaitMs < 12_000L &&
+                            device.bondState == BluetoothDevice.BOND_BONDING
+                        ) {
+                            delay(300)
+                            bondingWaitMs += 300
+                        }
                     }
                 }
 
-                // Step 5: Execute strategy-specific connection bypass
                 var connectedSuccess = false
 
                 when (effectiveStrategy) {
                     BypassStrategy.LEGACY_HID_MAGIC_MOUSE -> {
-                        _statusMessage.value = "Connecting HID Input Profile (Magic Mouse / Keyboard bypass)..."
-                        // Connect HID Host profile (profile 4) + PAN (profile 5) via reflection
+                        _statusMessage.value = "Connecting HID Input ($name)..."
                         val hidOk = connectViaProfileProxy(device, PROFILE_HID_HOST)
                         connectViaProfileProxy(device, PROFILE_PAN)
-                        // Also open insecure baseband wakeup channel (helps Apple Magic Mouse 1st Gen & older BT 2.0/2.1 HID)
-                        val basebandOk = establishInsecureBasebandWakeup(device, keepSocketOpen = false)
-                        delay(700)
+                        val basebandOk = if (!isDeviceAclConnected(device)) {
+                            establishInsecureBasebandWakeup(
+                                device = device,
+                                uuidsToTry = listOf(UUID_HID_CLASSIC, UUID_PNP_INFO, UUID_SPP),
+                                channelsToTry = listOf(17, 19, 1),
+                                keepSocketOpen = false
+                            )
+                        } else {
+                            true
+                        }
+                        if (basebandOk && !hidOk) {
+                            connectViaProfileProxy(device, PROFILE_HID_HOST)
+                        }
+                        delay(400)
                         connectedSuccess = hidOk || basebandOk || isDeviceAclConnected(device)
                     }
 
                     BypassStrategy.AUDIO_HEADSET_FORCE -> {
-                        _statusMessage.value = "Forcing A2DP & Hands-Free Headset profiles..."
+                        _statusMessage.value = "Connecting Audio ($name)..."
                         val a2dpOk = connectViaProfileProxy(device, PROFILE_A2DP)
                         val hfpOk = connectViaProfileProxy(device, PROFILE_HEADSET)
-                        delay(700)
+                        delay(500)
                         connectedSuccess = a2dpOk || hfpOk || isDeviceAclConnected(device)
                         if (!connectedSuccess) {
-                            connectedSuccess = establishInsecureBasebandWakeup(device, keepSocketOpen = true)
+                            connectedSuccess = establishInsecureBasebandWakeup(
+                                device = device,
+                                uuidsToTry = listOf(UUID_A2DP_SINK, UUID_HANDSFREE, UUID_SPP),
+                                channelsToTry = listOf(1, 2),
+                                keepSocketOpen = true
+                            )
                         }
                     }
 
                     BypassStrategy.INSECURE_RFCOMM_DIRECT -> {
-                        _statusMessage.value = "Opening direct insecure RFCOMM baseband socket..."
-                        connectedSuccess = establishInsecureBasebandWakeup(device, keepSocketOpen = true)
-                        // Also nudge HID/A2DP profiles once ACL is up
+                        _statusMessage.value = "Opening direct baseband link ($name)..."
+                        connectedSuccess = establishInsecureBasebandWakeup(
+                            device = device,
+                            uuidsToTry = listOf(UUID_SPP, UUID_HID_CLASSIC, UUID_PNP_INFO),
+                            channelsToTry = listOf(1, 2, 11, 17, 19),
+                            keepSocketOpen = true
+                        )
                         connectAllAvailableProfiles(device)
                     }
 
                     BypassStrategy.BLE_GATT_DIRECT -> {
-                        _statusMessage.value = "Connecting direct BLE GATT bridge..."
+                        _statusMessage.value = "Connecting BLE GATT ($name)..."
                         connectedSuccess = connectViaBleGatt(device)
-                        // Also nudge HID Host in case it's HOGP
                         connectViaProfileProxy(device, PROFILE_HID_HOST)
                     }
 
                     BypassStrategy.SMART_AUTO -> {
-                        _statusMessage.value = "Connecting profiles & direct baseband link..."
+                        _statusMessage.value = "Connecting $name..."
                         val profileOk = connectAllAvailableProfiles(device)
                         val basebandOk = if (deviceModel.deviceType == BluetoothDevice.DEVICE_TYPE_LE) {
                             connectViaBleGatt(device)
+                        } else if (!isDeviceAclConnected(device)) {
+                            establishInsecureBasebandWakeup(
+                                device = device,
+                                uuidsToTry = listOf(UUID_HID_CLASSIC, UUID_SPP, UUID_A2DP_SINK),
+                                channelsToTry = listOf(1, 17, 19),
+                                keepSocketOpen = !profileOk
+                            )
                         } else {
-                            establishInsecureBasebandWakeup(device, keepSocketOpen = !profileOk)
+                            true
                         }
-                        delay(600)
+                        delay(400)
                         connectedSuccess = profileOk || basebandOk || isDeviceAclConnected(device)
                     }
                 }
 
-                upsertFromBluetoothDevice(device, forceConnected = connectedSuccess || isDeviceAclConnected(device))
+                val aclActive = isDeviceAclConnected(device)
+                upsertFromBluetoothDevice(device, forceConnected = connectedSuccess || aclActive)
                 refreshBondedAndConnectedDevices()
 
-                if (connectedSuccess || isDeviceAclConnected(device) || device.bondState == BluetoothDevice.BOND_BONDED) {
-                    val stateNote = if (isDeviceAclConnected(device) || connectedSuccess) {
-                        "Connected to $name"
-                    } else {
-                        "Paired with $name — move/click device to wake input link"
-                    }
-                    _statusMessage.value = stateNote
-                    appendLog("SUCCESS: $stateNote")
+                if (aclActive || connectedSuccess) {
+                    _statusMessage.value = "Connected to $name"
+                    appendLog("Connected to $name")
+                } else if (device.bondState == BluetoothDevice.BOND_BONDED) {
+                    _statusMessage.value = "Paired $name — click/move device to wake"
+                    appendLog("Paired $name (waiting for input wake)")
                 } else {
-                    _statusMessage.value = "Could not reach $name — ensure it is in pairing/discovery mode and try Legacy HID or Baseband mode"
-                    appendLog("WARNING: Connection attempt to $name finished without active ACL confirmation")
+                    _statusMessage.value = "Could not reach $name — check pairing mode"
+                    appendLog("Connection attempt finished without active link for $name")
                 }
+            } catch (ce: CancellationException) {
+                throw ce
             } catch (e: Exception) {
-                appendLog("ERROR connecting to ${deviceModel.address}: ${e.message}")
-                _statusMessage.value = "Connection error: ${e.localizedMessage ?: "Unknown error"}"
+                appendLog("Error connecting ${deviceModel.address}: ${e.message}")
+                _statusMessage.value = "Failed: ${e.localizedMessage ?: "Connection error"}"
             } finally {
-                _connectingAddress.value = null
+                pendingSocket = null
+                if (_connectingAddress.value == address) {
+                    _connectingAddress.value = null
+                }
                 refreshBondedAndConnectedDevices()
             }
         }
@@ -557,41 +651,7 @@ class BluetoothBypassController(private val context: Context) {
 
     fun disconnectDevice(deviceModel: BtDeviceModel) {
         scope.launch {
-            val address = deviceModel.address
-            _statusMessage.value = "Disconnecting ${deviceModel.displayName}..."
-            appendLog("Disconnecting ${deviceModel.displayName} [$address]")
-
-            // Close any active RFCOMM socket
-            activeSockets.remove(address)?.let { socket ->
-                runCatching { socket.close() }
-                appendLog("Closed direct RFCOMM socket for $address")
-            }
-
-            // Close any active BLE GATT connection
-            activeGatts.remove(address)?.let { gatt ->
-                runCatching {
-                    gatt.disconnect()
-                    gatt.close()
-                }
-                appendLog("Closed direct BLE GATT connection for $address")
-            }
-
-            // Disconnect from all bound system profile proxies
-            val device = runCatching { adapter?.getRemoteDevice(address) }.getOrNull()
-            if (device != null) {
-                profileProxies.forEach { (profileId, proxy) ->
-                    runCatching {
-                        val disconnectMethod = proxy.javaClass.getMethod("disconnect", BluetoothDevice::class.java)
-                        disconnectMethod.isAccessible = true
-                        disconnectMethod.invoke(proxy, device)
-                        appendLog("Invoked disconnect() on ${profileName(profileId)}")
-                    }
-                }
-                delay(500)
-                upsertFromBluetoothDevice(device, forceConnected = false)
-            }
-
-            refreshBondedAndConnectedDevices()
+            performDisconnectInternal(deviceModel)
             _statusMessage.value = "Disconnected ${deviceModel.displayName}"
         }
     }
@@ -599,91 +659,120 @@ class BluetoothBypassController(private val context: Context) {
     fun unpairDevice(deviceModel: BtDeviceModel) {
         scope.launch {
             val address = deviceModel.address
-            disconnectDevice(deviceModel)
-            delay(300)
+            performDisconnectInternal(deviceModel)
             val device = runCatching { adapter?.getRemoteDevice(address) }.getOrNull() ?: return@launch
             val removed = invokeRemoveBond(device)
             appendLog("Unpair (removeBond) on $address -> $removed")
-            delay(500)
+            delay(400)
             upsertFromBluetoothDevice(device, forceConnected = false)
             refreshBondedAndConnectedDevices()
-            _statusMessage.value = if (removed) {
-                "Unpaired ${deviceModel.displayName}"
-            } else {
-                "Requested unpair for ${deviceModel.displayName}"
+            _statusMessage.value = "Unpaired ${deviceModel.displayName}"
+        }
+    }
+
+    private suspend fun performDisconnectInternal(deviceModel: BtDeviceModel) {
+        val address = deviceModel.address
+        if (_connectingAddress.value == address) {
+            cancelCurrentConnection()
+        }
+        appendLog("Disconnecting ${deviceModel.displayName} [$address]")
+
+        activeSockets.remove(address)?.let { socket ->
+            runCatching { socket.close() }
+        }
+
+        activeGatts.remove(address)?.let { gatt ->
+            runCatching {
+                gatt.disconnect()
+                gatt.close()
             }
         }
+
+        val device = runCatching { adapter?.getRemoteDevice(address) }.getOrNull()
+        if (device != null) {
+            profileProxies.forEach { (profileId, proxy) ->
+                invokeHiddenMethod(
+                    target = proxy,
+                    methodName = "disconnect",
+                    paramTypes = arrayOf(BluetoothDevice::class.java),
+                    args = arrayOf(device)
+                )
+                appendLog("Disconnected ${profileName(profileId)}")
+            }
+            delay(350)
+            upsertFromBluetoothDevice(device, forceConnected = false)
+        }
+        refreshBondedAndConnectedDevices()
     }
 
     fun clearLogs() {
         _logs.value = emptyList()
     }
 
-    private fun handlePairingBypass(device: BluetoothDevice, variant: Int) {
+    private fun handlePairingBypass(device: BluetoothDevice, variant: Int): Boolean {
         val pin = _defaultPin.value.ifBlank { "0000" }
-        try {
+        return try {
             when (variant) {
                 BluetoothDevice.PAIRING_VARIANT_PIN -> {
                     val pinBytes = pin.toByteArray(Charsets.UTF_8)
                     val pinSet = device.setPin(pinBytes)
                     runCatching { device.setPairingConfirmation(true) }
-                    appendLog("Auto-injected legacy PIN '$pin' for ${device.address} (result=$pinSet)")
+                    appendLog("Injected legacy PIN '$pin' for ${device.address} (ok=$pinSet)")
+                    pinSet
                 }
 
                 BluetoothDevice.PAIRING_VARIANT_PASSKEY_CONFIRMATION -> {
-                    runCatching {
+                    val confirmed = runCatching {
                         device.setPairingConfirmation(true)
-                        appendLog("Auto-confirmed SSP Passkey for ${device.address}")
-                    }.onFailure {
-                        appendLog("Passkey auto-confirm note: ${it.message}")
-                    }
+                        true
+                    }.getOrDefault(false)
+                    appendLog("Auto-confirmed SSP Passkey for ${device.address} (ok=$confirmed)")
+                    confirmed
                 }
 
                 else -> {
-                    // Variant 3 (CONSENT), Variant 4 (DISPLAY_PASSKEY), Variant 5 (DISPLAY_PIN), Variant 7 (PIN_16_DIGITS)
                     val pinBytes = pin.toByteArray(Charsets.UTF_8)
-                    runCatching { device.setPin(pinBytes) }
+                    val pinSet = runCatching { device.setPin(pinBytes) }.getOrDefault(false)
                     runCatching { device.setPairingConfirmation(true) }
-                    appendLog("Applied universal pairing confirmation & PIN '$pin' for variant=$variant")
+                    appendLog("Applied PIN '$pin' & confirmation for variant=$variant")
+                    pinSet
                 }
             }
         } catch (e: Exception) {
-            appendLog("Auto-pairing helper note: ${e.message}")
+            appendLog("Auto-pair note: ${e.message}")
+            false
         }
     }
 
     private fun invokeCreateBondWithTransport(device: BluetoothDevice, transport: Int): Boolean {
-        return try {
-            val createBondMethod = device.javaClass.getMethod("createBond", Int::class.javaPrimitiveType)
-            createBondMethod.isAccessible = true
-            val result = createBondMethod.invoke(device, transport) as? Boolean ?: false
-            if (!result) {
-                device.createBond()
-            } else {
-                true
-            }
-        } catch (_: Exception) {
+        val res = invokeHiddenMethod(
+            target = device,
+            methodName = "createBond",
+            paramTypes = arrayOf(Int::class.javaPrimitiveType!!),
+            args = arrayOf(transport)
+        ) as? Boolean
+        return if (res == true) {
+            true
+        } else {
             runCatching { device.createBond() }.getOrDefault(false)
         }
     }
 
     private fun invokeRemoveBond(device: BluetoothDevice): Boolean {
-        return try {
-            // Cancel in-progress bonding first if stuck
-            if (device.bondState == BluetoothDevice.BOND_BONDING) {
-                runCatching {
-                    val cancelMethod = device.javaClass.getMethod("cancelBondProcess")
-                    cancelMethod.isAccessible = true
-                    cancelMethod.invoke(device)
-                }
-            }
-            val removeBondMethod = device.javaClass.getMethod("removeBond")
-            removeBondMethod.isAccessible = true
-            removeBondMethod.invoke(device) as? Boolean ?: false
-        } catch (e: Exception) {
-            appendLog("removeBond reflection note: ${e.message}")
-            false
+        if (device.bondState == BluetoothDevice.BOND_BONDING) {
+            invokeHiddenMethod(
+                target = device,
+                methodName = "cancelBondProcess",
+                paramTypes = emptyArray(),
+                args = emptyArray()
+            )
         }
+        return invokeHiddenMethod(
+            target = device,
+            methodName = "removeBond",
+            paramTypes = emptyArray(),
+            args = emptyArray()
+        ) as? Boolean ?: false
     }
 
     private fun connectAllAvailableProfiles(device: BluetoothDevice): Boolean {
@@ -699,168 +788,219 @@ class BluetoothBypassController(private val context: Context) {
     private fun connectViaProfileProxy(device: BluetoothDevice, profileId: Int): Boolean {
         val proxy = profileProxies[profileId] ?: return false
         val name = profileName(profileId)
-        return try {
-            // Try enabling priority / connection policy first
-            runCatching {
-                val policyMethod = proxy.javaClass.getMethod(
-                    "setConnectionPolicy",
-                    BluetoothDevice::class.java,
-                    Int::class.javaPrimitiveType
-                )
-                policyMethod.isAccessible = true
-                policyMethod.invoke(proxy, device, 100) // CONNECTION_POLICY_ALLOWED = 100
-            }
-            runCatching {
-                val priorityMethod = proxy.javaClass.getMethod(
-                    "setPriority",
-                    BluetoothDevice::class.java,
-                    Int::class.javaPrimitiveType
-                )
-                priorityMethod.isAccessible = true
-                priorityMethod.invoke(proxy, device, 100) // PRIORITY_ON = 100
-            }
 
-            val connectMethod = proxy.javaClass.getMethod("connect", BluetoothDevice::class.java)
-            connectMethod.isAccessible = true
-            val ok = connectMethod.invoke(proxy, device) as? Boolean ?: false
-            appendLog("Profile proxy $name.connect(${device.address}) -> $ok")
-            ok
-        } catch (e: Exception) {
-            appendLog("Profile proxy $name reflection note: ${e.javaClass.simpleName}")
-            false
-        }
+        invokeHiddenMethod(
+            target = proxy,
+            methodName = "setConnectionPolicy",
+            paramTypes = arrayOf(BluetoothDevice::class.java, Int::class.javaPrimitiveType!!),
+            args = arrayOf(device, 100)
+        )
+        invokeHiddenMethod(
+            target = proxy,
+            methodName = "setPriority",
+            paramTypes = arrayOf(BluetoothDevice::class.java, Int::class.javaPrimitiveType!!),
+            args = arrayOf(device, 100)
+        )
+
+        val ok = invokeHiddenMethod(
+            target = proxy,
+            methodName = "connect",
+            paramTypes = arrayOf(BluetoothDevice::class.java),
+            args = arrayOf(device)
+        ) as? Boolean ?: false
+
+        appendLog("$name.connect(${device.address}) -> $ok")
+        return ok
     }
 
     /**
-     * Opens a non-MITM insecure RFCOMM socket to force Android's Bluetooth stack
-     * to page the remote device, negotiate baseband ACL + link key, and wake up
-     * legacy devices (like Apple Magic Mouse, legacy keyboards, and SPP peripherals).
+     * Invokes a method on an Android Bluetooth class using standard reflection first,
+     * with a meta-reflection fallback (`Class.getDeclaredMethod`) for hidden system APIs.
      */
+    private fun invokeHiddenMethod(
+        target: Any,
+        methodName: String,
+        paramTypes: Array<Class<*>>,
+        args: Array<Any?>
+    ): Any? {
+        return try {
+            val method = try {
+                target.javaClass.getMethod(methodName, *paramTypes)
+            } catch (_: NoSuchMethodException) {
+                target.javaClass.getDeclaredMethod(methodName, *paramTypes)
+            }
+            method.isAccessible = true
+            method.invoke(target, *args)
+        } catch (_: Exception) {
+            try {
+                val getDeclaredMethod = Class::class.java.getDeclaredMethod(
+                    "getDeclaredMethod",
+                    String::class.java,
+                    arrayOf<Class<*>>()::class.java
+                )
+                val method = getDeclaredMethod.invoke(target.javaClass, methodName, paramTypes) as? Method
+                    ?: return null
+                method.isAccessible = true
+                method.invoke(target, *args)
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+
+    private suspend fun connectSocketWithTimeout(
+        socket: BluetoothSocket,
+        timeoutMs: Long = SOCKET_CONNECT_TIMEOUT_MS
+    ): Boolean = withContext(Dispatchers.IO) {
+        pendingSocket = socket
+        val watchdog = scope.launch {
+            delay(timeoutMs)
+            runCatching { socket.close() }
+        }
+        try {
+            socket.connect()
+            watchdog.cancel()
+            true
+        } catch (_: Exception) {
+            watchdog.cancel()
+            runCatching { socket.close() }
+            false
+        } finally {
+            if (pendingSocket === socket) {
+                pendingSocket = null
+            }
+        }
+    }
+
     private suspend fun establishInsecureBasebandWakeup(
         device: BluetoothDevice,
+        uuidsToTry: List<UUID>,
+        channelsToTry: List<Int>,
         keepSocketOpen: Boolean
     ): Boolean = withContext(Dispatchers.IO) {
         val candidateUuids = buildList {
             device.uuids?.mapNotNull { it?.uuid }?.forEach { add(it) }
-            add(UUID_HID_CLASSIC)
-            add(UUID_SPP)
-            add(UUID_PNP_INFO)
-            add(UUID_A2DP_SINK)
-            add(UUID_HANDSFREE)
-        }.distinct()
+            addAll(uuidsToTry)
+        }.distinct().take(3)
 
-        // 1. Try insecure service record sockets
-        for (uuid in candidateUuids.take(4)) {
-            try {
-                val socket = device.createInsecureRfcommSocketToServiceRecord(uuid)
-                appendLog("Paging baseband via Insecure RFCOMM UUID ${uuid.toString().take(8)}...")
-                socket.connect()
-                appendLog("Baseband socket connected via UUID ${uuid.toString().take(8)}!")
+        for (uuid in candidateUuids) {
+            if (!coroutineContext.isActive) return@withContext false
+            val socket = runCatching {
+                device.createInsecureRfcommSocketToServiceRecord(uuid)
+            }.getOrNull() ?: continue
+
+            appendLog("Paging baseband via UUID ${uuid.toString().take(8)}...")
+            if (connectSocketWithTimeout(socket)) {
+                appendLog("Baseband link active via UUID ${uuid.toString().take(8)}")
                 if (keepSocketOpen) {
                     activeSockets.put(device.address, socket)?.let { old -> runCatching { old.close() } }
                 } else {
-                    delay(250)
+                    delay(200)
                     runCatching { socket.close() }
                 }
                 return@withContext true
-            } catch (_: Exception) {
-                // If ACL link came up during the handshake (very common for HID devices like Magic Mouse!), check it:
-                if (isDeviceAclConnected(device)) {
-                    appendLog("ACL baseband link is now ACTIVE after paging handshake!")
-                    return@withContext true
-                }
+            }
+            if (isDeviceAclConnected(device)) {
+                return@withContext true
             }
         }
 
-        // 2. Try direct insecure RFCOMM channel reflection (channels 1, 2, 11, 17, 19)
-        for (channel in listOf(1, 2, 11, 17, 19)) {
-            try {
-                val method = device.javaClass.getMethod("createInsecureRfcommSocket", Int::class.javaPrimitiveType)
-                method.isAccessible = true
-                val socket = method.invoke(device, channel) as? BluetoothSocket ?: continue
-                appendLog("Probing direct insecure RFCOMM channel $channel...")
-                socket.connect()
-                appendLog("Connected on direct insecure RFCOMM channel $channel!")
+        for (channel in channelsToTry) {
+            if (!coroutineContext.isActive) return@withContext false
+            val socket = invokeHiddenMethod(
+                target = device,
+                methodName = "createInsecureRfcommSocket",
+                paramTypes = arrayOf(Int::class.javaPrimitiveType!!),
+                args = arrayOf(channel)
+            ) as? BluetoothSocket ?: continue
+
+            appendLog("Paging insecure RFCOMM channel $channel...")
+            if (connectSocketWithTimeout(socket)) {
+                appendLog("Connected on RFCOMM channel $channel")
                 if (keepSocketOpen) {
                     activeSockets.put(device.address, socket)?.let { old -> runCatching { old.close() } }
                 } else {
-                    delay(250)
+                    delay(200)
                     runCatching { socket.close() }
                 }
                 return@withContext true
-            } catch (_: Exception) {
-                if (isDeviceAclConnected(device)) {
-                    appendLog("ACL baseband link activated via channel $channel handshake!")
-                    return@withContext true
-                }
+            }
+            if (isDeviceAclConnected(device)) {
+                return@withContext true
             }
         }
 
         isDeviceAclConnected(device)
     }
 
-    private suspend fun connectViaBleGatt(device: BluetoothDevice): Boolean = withContext(Dispatchers.Main) {
-        val resultSignal = kotlinx.coroutines.CompletableDeferred<Boolean>()
+    private suspend fun connectViaBleGatt(device: BluetoothDevice): Boolean {
+        val resultSignal = CompletableDeferred<Boolean>()
         val gattCallback = object : BluetoothGattCallback() {
             override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    appendLog("BLE GATT connected to ${device.address} (status=$status)")
+                    appendLog("BLE GATT connected: ${device.address}")
                     runCatching { gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) }
                     runCatching { gatt.discoverServices() }
                     upsertFromBluetoothDevice(device, forceConnected = true)
                     if (!resultSignal.isCompleted) resultSignal.complete(true)
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    appendLog("BLE GATT disconnected from ${device.address} (status=$status)")
-                    activeGatts.remove(device.address)
+                    appendLog("BLE GATT disconnected: ${device.address}")
+                    activeGatts.remove(device.address)?.let { runCatching { it.close() } }
                     upsertFromBluetoothDevice(device, forceConnected = false)
                     if (!resultSignal.isCompleted) resultSignal.complete(false)
                 }
             }
 
             override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-                val serviceCount = gatt.services?.size ?: 0
                 val hasHogp = gatt.services?.any { it.uuid == UUID_HID_LE_HOGP } == true
-                appendLog("Discovered $serviceCount BLE GATT services (HID-over-GATT=$hasHogp)")
+                appendLog("Discovered ${gatt.services?.size ?: 0} BLE services (HOGP=$hasHogp)")
                 upsertFromBluetoothDevice(device, forceConnected = true)
             }
         }
 
-        val gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        val gatt = withContext(Dispatchers.Main) {
             device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-        } else {
-            device.connectGatt(context, false, gattCallback)
+        } ?: return false
+
+        activeGatts.put(device.address, gatt)?.let { old ->
+            runCatching {
+                old.disconnect()
+                old.close()
+            }
         }
 
-        if (gatt != null) {
-            activeGatts.put(device.address, gatt)?.let { old -> runCatching { old.close() } }
-        } else {
-            return@withContext false
+        val connected = withTimeoutOrNull(6_500L) {
+            resultSignal.await()
+        } ?: false
+
+        if (!connected && !isDeviceAclConnected(device)) {
+            activeGatts.remove(device.address)?.let {
+                runCatching {
+                    it.disconnect()
+                    it.close()
+                }
+            }
         }
 
-        withContext(Dispatchers.IO) {
-            kotlinx.coroutines.withTimeoutOrNull(8_000L) {
-                resultSignal.await()
-            } ?: isDeviceAclConnected(device)
-        }
+        return connected || isDeviceAclConnected(device)
     }
 
     private fun isDeviceAclConnected(device: BluetoothDevice): Boolean {
         if (activeSockets[device.address]?.isConnected == true) return true
         if (activeGatts.containsKey(device.address)) return true
 
-        // Check bound profile proxies
         for ((_, proxy) in profileProxies) {
             val connected = runCatching { proxy.connectedDevices?.any { it.address == device.address } == true }
                 .getOrDefault(false)
             if (connected) return true
         }
 
-        // Check BluetoothDevice.isConnected() via reflection
-        return runCatching {
-            val method = device.javaClass.getMethod("isConnected")
-            method.isAccessible = true
-            method.invoke(device) as? Boolean ?: false
-        }.getOrDefault(false)
+        return (invokeHiddenMethod(
+            target = device,
+            methodName = "isConnected",
+            paramTypes = emptyArray(),
+            args = emptyArray()
+        ) as? Boolean) ?: false
     }
 
     private fun getConnectedProfileNames(device: BluetoothDevice): Set<String> {
@@ -892,7 +1032,14 @@ class BluetoothBypassController(private val context: Context) {
         val address = device.address ?: return BtDeviceModel(address = "00:00:00:00:00:00", name = "Unknown")
         val existing = deviceCache[address]
 
-        val resolvedName = runCatching { device.name }.getOrNull()?.takeIf { it.isNotBlank() }
+        val aliasOrName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching { device.alias }.getOrNull()?.takeIf { it.isNotBlank() }
+                ?: runCatching { device.name }.getOrNull()?.takeIf { it.isNotBlank() }
+        } else {
+            runCatching { device.name }.getOrNull()?.takeIf { it.isNotBlank() }
+        }
+
+        val resolvedName = aliasOrName
             ?: fallbackName?.takeIf { it.isNotBlank() }
             ?: existing?.name
 
@@ -959,8 +1106,8 @@ class BluetoothBypassController(private val context: Context) {
     private fun profileName(profileId: Int): String = when (profileId) {
         PROFILE_HID_HOST -> "HID Input"
         PROFILE_A2DP -> "A2DP Audio"
-        PROFILE_HEADSET -> "Headset HFP"
-        PROFILE_PAN -> "PAN Network"
+        PROFILE_HEADSET -> "Headset"
+        PROFILE_PAN -> "PAN"
         else -> "Profile#$profileId"
     }
 
@@ -978,11 +1125,22 @@ class BluetoothBypassController(private val context: Context) {
     }
 
     fun release() {
-        stopScan()
+        cancelCurrentConnection()
+        stopScanRadioInternal()
+        scanJob?.cancel()
         if (receiverRegistered) {
             runCatching { context.unregisterReceiver(bluetoothReceiver) }
             receiverRegistered = false
         }
+        activeSockets.values.forEach { runCatching { it.close() } }
+        activeSockets.clear()
+        activeGatts.values.forEach {
+            runCatching {
+                it.disconnect()
+                it.close()
+            }
+        }
+        activeGatts.clear()
         profileProxies.forEach { (profileId, proxy) ->
             runCatching { adapter?.closeProfileProxy(profileId, proxy) }
         }

@@ -1,14 +1,16 @@
 package io.github.ultrapg.btconnect.model
 
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothClass
 import android.bluetooth.BluetoothDevice
+import java.util.Locale
 
-enum class DeviceCategory(val label: String) {
-    MOUSE_KEYBOARD_HID("Mouse / Keyboard / HID"),
-    AUDIO_VIDEO("Audio / Speaker / Headset"),
-    PHONE_COMPUTER("Computer / Phone"),
-    WEARABLE_HEALTH("Wearable / Accessory"),
-    OTHER_PERIPHERAL("Bluetooth Device")
+enum class DeviceCategory(val label: String, val shortLabel: String) {
+    MOUSE_KEYBOARD_HID("Mouse / Keyboard / HID", "HID Input"),
+    AUDIO_VIDEO("Audio / Speaker / Headset", "Audio"),
+    PHONE_COMPUTER("Computer / Phone", "Computer/Phone"),
+    WEARABLE_HEALTH("Wearable / Accessory", "Wearable"),
+    OTHER_PERIPHERAL("Bluetooth Peripheral", "Bluetooth")
 }
 
 enum class BypassStrategy(
@@ -18,27 +20,27 @@ enum class BypassStrategy(
 ) {
     SMART_AUTO(
         title = "Smart Bypass (Recommended)",
-        subtitle = "Auto-detects HID, Audio, Classic, or BLE; injects legacy PIN & forces profile + baseband link",
+        subtitle = "Auto-detects HID, Audio, Classic, or BLE; injects PIN & forces profile + baseband",
         badge = "Auto"
     ),
     LEGACY_HID_MAGIC_MOUSE(
         title = "Legacy Mouse / Keyboard (Magic Mouse)",
-        subtitle = "Forces Classic BR/EDR bond, auto-PIN 0000, HID Host Profile reflection & insecure wakeup channel",
+        subtitle = "Forces Classic BR/EDR bond, auto-PIN 0000, HID Host reflection & wakeup channel",
         badge = "HID / Mouse"
     ),
     AUDIO_HEADSET_FORCE(
         title = "Force Audio (A2DP + Headset)",
-        subtitle = "Bypasses Settings audio queue via direct A2DP & HFP profile proxy reflection",
+        subtitle = "Direct A2DP & HFP profile proxy reflection + SDP wakeup",
         badge = "Audio"
     ),
     INSECURE_RFCOMM_DIRECT(
         title = "Direct Insecure Baseband Socket",
-        subtitle = "Establishes no-MITM insecure RFCOMM link across legacy channels (1-19) for stubborn devices",
+        subtitle = "No-MITM insecure RFCOMM link across legacy channels for stubborn devices",
         badge = "Baseband"
     ),
     BLE_GATT_DIRECT(
         title = "Direct BLE GATT Bridge",
-        subtitle = "Forces high-priority LE transport GATT connection & discovers HOGP / vendor services",
+        subtitle = "High-priority LE GATT connection & HID-over-GATT service discovery",
         badge = "BLE GATT"
     )
 }
@@ -57,7 +59,7 @@ data class BtDeviceModel(
     val lastSeenMs: Long = System.currentTimeMillis()
 ) {
     val displayName: String
-        get() = name?.takeIf { it.isNotBlank() } ?: "Unnamed Device (${address.takeLast(8)})"
+        get() = name?.takeIf { it.isNotBlank() } ?: "Device ${address.takeLast(8)}"
 
     val isBonded: Boolean
         get() = bondState == BluetoothDevice.BOND_BONDED
@@ -67,15 +69,15 @@ data class BtDeviceModel(
 
     val transportLabel: String
         get() = when (deviceType) {
-            BluetoothDevice.DEVICE_TYPE_CLASSIC -> "Classic BR/EDR"
+            BluetoothDevice.DEVICE_TYPE_CLASSIC -> "Classic"
             BluetoothDevice.DEVICE_TYPE_LE -> "BLE"
-            BluetoothDevice.DEVICE_TYPE_DUAL -> "Dual (BR/EDR + BLE)"
-            else -> "Classic / Auto"
+            BluetoothDevice.DEVICE_TYPE_DUAL -> "Dual"
+            else -> "BT"
         }
 
     val isLikelyLegacyHidOrMagicMouse: Boolean
         get() {
-            val lower = (name ?: "").lowercase()
+            val lower = (name ?: "").lowercase(Locale.US)
             if (lower.contains("magic mouse") ||
                 lower.contains("magic trackpad") ||
                 lower.contains("wireless keyboard") ||
@@ -92,7 +94,6 @@ data class BtDeviceModel(
             if (majorClass == BluetoothClass.Device.Major.PERIPHERAL) {
                 return true
             }
-            // HID UUIDs (00001124 for Classic HID, 00001812 for BLE HOGP)
             return uuids.any {
                 it.startsWith("00001124", ignoreCase = true) ||
                     it.startsWith("00001812", ignoreCase = true)
@@ -108,10 +109,11 @@ data class BtDeviceModel(
                         it.startsWith("00001108", ignoreCase = true) ||
                         it.startsWith("0000111e", ignoreCase = true)
                 } ||
-                (name ?: "").lowercase().let {
+                (name ?: "").lowercase(Locale.US).let {
                     it.contains("headphone") || it.contains("speaker") ||
                         it.contains("earbud") || it.contains("airpods") ||
-                        it.contains("audio") || it.contains("buds")
+                        it.contains("audio") || it.contains("buds") ||
+                        it.contains("headset")
                 } -> DeviceCategory.AUDIO_VIDEO
             majorClass == BluetoothClass.Device.Major.COMPUTER ||
                 majorClass == BluetoothClass.Device.Major.PHONE -> DeviceCategory.PHONE_COMPUTER
@@ -127,4 +129,36 @@ data class BtDeviceModel(
             deviceType == BluetoothDevice.DEVICE_TYPE_LE -> BypassStrategy.BLE_GATT_DIRECT
             else -> BypassStrategy.SMART_AUTO
         }
+
+    val conciseSubtitle: String
+        get() = when {
+            isConnected -> {
+                if (connectedProfiles.isNotEmpty()) {
+                    "Connected • ${connectedProfiles.joinToString(", ")}"
+                } else {
+                    "Connected • ${category.shortLabel}"
+                }
+            }
+            isBonding -> "Pairing..."
+            isBonded -> "Saved • ${category.shortLabel} • $address"
+            else -> buildString {
+                append(category.shortLabel)
+                append(" • ")
+                append(address)
+                rssi?.let { append(" • ${it}dBm") }
+            }
+        }
+
+    companion object {
+        /**
+         * Normalizes any user-entered MAC string (e.g. "001a7dda7113", "00-1A-7D-DA-71-13",
+         * or "00:1A:7D:DA:71:13") into standard uppercase "XX:XX:XX:XX:XX:XX" format,
+         * or returns null if invalid.
+         */
+        fun normalizeMacAddress(raw: String): String? {
+            val hexOnly = raw.trim().uppercase(Locale.US).filter { it in '0'..'9' || it in 'A'..'F' }
+            if (hexOnly.length != 12) return null
+            return hexOnly.chunked(2).joinToString(":")
+        }
+    }
 }

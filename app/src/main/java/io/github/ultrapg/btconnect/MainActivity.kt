@@ -3,6 +3,7 @@ package io.github.ultrapg.btconnect
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.le.ScanResult
 import android.companion.AssociationInfo
 import android.companion.AssociationRequest
 import android.companion.BluetoothDeviceFilter
@@ -52,15 +53,10 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         val data = result.data ?: return@registerForActivityResult
-        val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            data.getParcelableExtra(CompanionDeviceManager.EXTRA_DEVICE, BluetoothDevice::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            data.getParcelableExtra(CompanionDeviceManager.EXTRA_DEVICE)
-        }
-        if (device?.address != null) {
-            bypassController.appendLog("CompanionDeviceManager associated device: ${device.address}")
-            bypassController.connectByMac(device.address)
+        val macAddress = extractCompanionMacAddress(data)
+        if (!macAddress.isNullOrBlank()) {
+            bypassController.appendLog("CompanionDeviceManager selected: $macAddress")
+            bypassController.connectByMac(macAddress)
         }
     }
 
@@ -113,6 +109,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @Suppress("DEPRECATION")
+    private fun extractCompanionMacAddress(data: Intent): String? {
+        val extraObj: Any? = data.extras?.get(CompanionDeviceManager.EXTRA_DEVICE)
+        return when (extraObj) {
+            is BluetoothDevice -> extraObj.address
+            is ScanResult -> extraObj.device?.address
+            else -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && extraObj is AssociationInfo) {
+                    extraObj.deviceMacAddress?.toString()
+                } else {
+                    null
+                }
+            }
+        }
+    }
+
     private fun requiredPermissions(): Array<String> {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             arrayOf(
@@ -155,7 +167,7 @@ class MainActivity : ComponentActivity() {
             .setSingleDevice(false)
             .build()
 
-        bypassController.appendLog("Requesting system CompanionDeviceManager association dialog...")
+        bypassController.appendLog("Opening system CompanionDeviceManager chooser...")
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val executor = Executor { it.run() }
