@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Bluetooth rune with direct connection spark -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M67.7,42.3L53.4,28h-2.4v18.2L40.1,35.3l-3.4,3.4L50.3,52.3L36.7,65.9l3.4,3.4L51,58.4V76.6h2.4l14.3,-14.3L56.1,52.3L67.7,42.3zM55.8,36.2l4.5,4.5l-4.5,4.5V36.2zM60.3,63.9l-4.5,4.5v-9L60.3,63.9z" />
+    <path
+        android:fillColor="#A8C7FA"
+        android:pathData="M33,52.3m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0" />
+    <path
+        android:fillColor="#A8C7FA"
+        android:pathData="M75,52.3m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0" />
+</vector>
