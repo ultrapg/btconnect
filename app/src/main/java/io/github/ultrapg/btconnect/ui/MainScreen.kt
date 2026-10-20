@@ -66,6 +66,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -81,6 +82,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import io.github.ultrapg.btconnect.bluetooth.BluetoothBypassController
 import io.github.ultrapg.btconnect.model.BtDeviceModel
 import io.github.ultrapg.btconnect.model.BypassStrategy
@@ -135,39 +137,35 @@ fun MainScreen(
             TopAppBar(
                 title = {
                     Column(
-                        modifier = Modifier.clickable { showLogSheet = true }
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showLogSheet = true },
+                        verticalArrangement = Arrangement.Center
                     ) {
                         Text(
                             text = "BTConnect",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontSize = 19.sp,
+                                lineHeight = 22.sp
+                            ),
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = statusMessage,
-                            style = MaterialTheme.typography.labelSmall,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                lineHeight = 14.sp
+                            ),
                             color = MaterialTheme.colorScheme.primary,
                             maxLines = 1,
+                            softWrap = false,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
                 },
                 actions = {
-                    AssistChip(
-                        onClick = { showPinSettingsSheet = true },
-                        label = {
-                            Text(
-                                text = if (autoPairEnabled) "PIN $defaultPin" else "PIN Off",
-                                style = MaterialTheme.typography.labelMedium
-                            )
-                        },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Default.Key,
-                                contentDescription = "Legacy PIN Settings",
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                    )
                     IconButton(onClick = { showMacDialog = true }) {
                         Icon(
                             imageVector = Icons.Default.AddLink,
@@ -225,7 +223,7 @@ fun MainScreen(
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
 
-            // Minimal Single-Line Filter Bar
+            // Minimal Single-Line Filter + Legacy PIN Bar
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -234,6 +232,29 @@ fun MainScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                AssistChip(
+                    onClick = { showPinSettingsSheet = true },
+                    label = {
+                        Text(
+                            text = if (autoPairEnabled) "PIN $defaultPin" else "PIN Off",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Default.Key,
+                            contentDescription = "Legacy PIN Settings",
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                )
+
+                VerticalDivider(
+                    modifier = Modifier
+                        .height(24.dp)
+                        .padding(horizontal = 2.dp)
+                )
+
                 DeviceFilter.entries.forEach { filter ->
                     FilterChip(
                         selected = selectedFilter == filter,

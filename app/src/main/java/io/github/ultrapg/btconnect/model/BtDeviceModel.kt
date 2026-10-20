@@ -1,6 +1,5 @@
 package io.github.ultrapg.btconnect.model
 
-import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothClass
 import android.bluetooth.BluetoothDevice
 import java.util.Locale
@@ -75,18 +74,49 @@ data class BtDeviceModel(
             else -> "BT"
         }
 
+    private val isAudioByClassOrName: Boolean
+        get() {
+            val lower = (name ?: "").lowercase(Locale.US)
+            if (lower.contains("audio") || lower.contains("speaker") ||
+                lower.contains("headphone") || lower.contains("earbud") ||
+                lower.contains("airpods") || lower.contains("buds") ||
+                lower.contains("headset") || lower.contains("sound")
+            ) {
+                return true
+            }
+            if (majorClass == BluetoothClass.Device.Major.AUDIO_VIDEO) {
+                return true
+            }
+            return uuids.any {
+                it.startsWith("0000110b", ignoreCase = true) ||
+                    it.startsWith("00001108", ignoreCase = true) ||
+                    it.startsWith("0000111e", ignoreCase = true)
+            }
+        }
+
+    private val isWearableByClassOrName: Boolean
+        get() {
+            val lower = (name ?: "").lowercase(Locale.US)
+            return majorClass == BluetoothClass.Device.Major.WEARABLE ||
+                majorClass == BluetoothClass.Device.Major.HEALTH ||
+                lower.contains("watch") || lower.contains("band") || lower.contains("ring")
+        }
+
     val isLikelyLegacyHidOrMagicMouse: Boolean
         get() {
+            if (isAudioByClassOrName || isWearableByClassOrName) return false
             val lower = (name ?: "").lowercase(Locale.US)
             if (lower.contains("magic mouse") ||
                 lower.contains("magic trackpad") ||
                 lower.contains("wireless keyboard") ||
                 lower.contains("apple") ||
                 lower.contains("mouse") ||
+                lower.contains("maus") ||
                 lower.contains("keyboard") ||
                 lower.contains("trackpad") ||
                 lower.contains("gamepad") ||
                 lower.contains("controller") ||
+                lower.contains("8bitdo") ||
                 lower.contains("joystick")
             ) {
                 return true
@@ -102,29 +132,17 @@ data class BtDeviceModel(
 
     val category: DeviceCategory
         get() = when {
+            isWearableByClassOrName -> DeviceCategory.WEARABLE_HEALTH
+            isAudioByClassOrName -> DeviceCategory.AUDIO_VIDEO
             isLikelyLegacyHidOrMagicMouse -> DeviceCategory.MOUSE_KEYBOARD_HID
-            majorClass == BluetoothClass.Device.Major.AUDIO_VIDEO ||
-                uuids.any {
-                    it.startsWith("0000110b", ignoreCase = true) ||
-                        it.startsWith("00001108", ignoreCase = true) ||
-                        it.startsWith("0000111e", ignoreCase = true)
-                } ||
-                (name ?: "").lowercase(Locale.US).let {
-                    it.contains("headphone") || it.contains("speaker") ||
-                        it.contains("earbud") || it.contains("airpods") ||
-                        it.contains("audio") || it.contains("buds") ||
-                        it.contains("headset")
-                } -> DeviceCategory.AUDIO_VIDEO
             majorClass == BluetoothClass.Device.Major.COMPUTER ||
                 majorClass == BluetoothClass.Device.Major.PHONE -> DeviceCategory.PHONE_COMPUTER
-            majorClass == BluetoothClass.Device.Major.WEARABLE ||
-                majorClass == BluetoothClass.Device.Major.HEALTH -> DeviceCategory.WEARABLE_HEALTH
             else -> DeviceCategory.OTHER_PERIPHERAL
         }
 
     val recommendedStrategy: BypassStrategy
         get() = when {
-            isLikelyLegacyHidOrMagicMouse -> BypassStrategy.LEGACY_HID_MAGIC_MOUSE
+            category == DeviceCategory.MOUSE_KEYBOARD_HID -> BypassStrategy.LEGACY_HID_MAGIC_MOUSE
             category == DeviceCategory.AUDIO_VIDEO -> BypassStrategy.AUDIO_HEADSET_FORCE
             deviceType == BluetoothDevice.DEVICE_TYPE_LE -> BypassStrategy.BLE_GATT_DIRECT
             else -> BypassStrategy.SMART_AUTO
@@ -150,11 +168,6 @@ data class BtDeviceModel(
         }
 
     companion object {
-        /**
-         * Normalizes any user-entered MAC string (e.g. "001a7dda7113", "00-1A-7D-DA-71-13",
-         * or "00:1A:7D:DA:71:13") into standard uppercase "XX:XX:XX:XX:XX:XX" format,
-         * or returns null if invalid.
-         */
         fun normalizeMacAddress(raw: String): String? {
             val hexOnly = raw.trim().uppercase(Locale.US).filter { it in '0'..'9' || it in 'A'..'F' }
             if (hexOnly.length != 12) return null
